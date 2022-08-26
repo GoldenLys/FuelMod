@@ -8,14 +8,14 @@ require("fuelMod\\stations")
 
 local SCRIPT = {
     NAME = "Realistic FuelMod",
-    VERSION = "3.0",
-    CONFIG_LOADED = false
+    VERSION = "3.1"
 }
 
 local fuelMod_threads = {
     "hud_thread",
     "loop_thread",
-    "refuel_thread"
+    "refuel_thread",
+    "manualrefuel_thread"
 }
 
 local usedVehicles = {}
@@ -241,28 +241,28 @@ local function drawFuelBar()
     end
 end
 
-local MANUAL_REFUEL_LOCK = false
 local function MANUAL_REFUELLING()
-    --print("MANUAL REFUEL 1")
-    if (MANUAL_REFUEL_LOCK == false and IsDriving() == true) then
-        MANUAL_REFUEL_LOCK = true
+    if (IsDriving() == false) then
         if usedVehicles[current.latestHash] < current.TankSize and ped.get_current_ped_weapon(player.get_player_ped(player.player_id())) == 883325847 and
             Get_Distance_Between_Coords(player.get_player_coords(player.player_id()), player.get_player_coords(player.player_id())) <= 1 then
             usedVehicles[current.latestHash] = usedVehicles[current.latestHash] + fuelSettings.manualRefuel
             if (usedVehicles[current.latestHash] > current.TankSize) then usedVehicles[current.latestHash] = current.TankSize end
-            notify("Vehicle manually refuelled at " .. Round(usedVehicles[current.latestHash], 2) .. "/" .. Round(current.TankSize, 0) .. ".", nil, 1, LuaUI.RGBAToInt(245, 128, 0, 255))
+            local fuel_level = Round(usedVehicles[current.latestHash] * 100 / current.TankSize, 0)
+            if fuelMod_threads["manualrefuel_thread"] == nil then
+                fuelMod_threads["manualrefuel_thread"] = menu.create_thread(function()
+                    while Realistic_FuelMod.on do
+                        LuaUI.drawText("Vehicle refuelled at ".. fuel_level .."%", 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
+                        system.yield(1500)
+                    end
+                end, nil)
+            end
+        else
+            fuelMod_threads["manualrefuel_thread"] = nil
         end
-        menu.create_thread(function()
-            system.yield(500)
-            MANUAL_REFUEL_LOCK = false
-        end, nil)
-        --print("MANUAL REFUEL 2")
     end
-    --print("MANUAL REFUEL 3")
 end
 
 local function fuelMod()
-    --print("FUEL 1")
     if (IsDriving() == true) then
         if IS_ELECTRIC() then current.TankSize = fuelConsumption.electrics[2]
         else current.TankSize = fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][2] end
@@ -270,17 +270,12 @@ local function fuelMod()
         fuelLevelDecreaseLevel()
         if current.FuelLevel == 0 then vehicle.set_vehicle_engine_on(currentVehicle(), false, true, true) end
         current.latestHash = currentVehicle()
-    else
-        --print("NO DETECTED VEHICLE")
-        if not isEmpty(current.latestHash) then MANUAL_REFUELLING() end
     end
-    --print("FUEL 2")
 end
 
 local Realistic_FuelMod = menu.add_feature("Realistic FuelMod", "toggle", 0, function(tog)
-    while tog.on do
+    if (tog.on) then
         if fuelMod_threads["loop_thread"] == nil then
-            --print("ADD LOOP 1")
             fuelMod_threads["loop_thread"] = menu.create_thread(function()
                 while tog.on do
                     fuelMod()
@@ -289,19 +284,19 @@ local Realistic_FuelMod = menu.add_feature("Realistic FuelMod", "toggle", 0, fun
             end, nil)
         end
         if fuelMod_threads["refuel_thread"] == nil then
-            --print("ADD LOOP 2")
             fuelMod_threads["refuel_thread"] = menu.create_thread(function()
                 while tog.on do
                     if (IsDriving() == true) then
                         UPDATE_VEHICLE_DB()
                         fuelLevelIncreaseLevel()
+                    else
+                        if not isEmpty(current.latestHash) then MANUAL_REFUELLING() end
                     end
                     system.yield(250)
                 end
             end, nil)
         end
         if fuelMod_threads["hud_thread"] == nil then
-            --print("ADD LOOP 3")
             fuelMod_threads["hud_thread"] = menu.create_thread(function()
                 while tog.on do
                     if (IsDriving() == true) then
@@ -317,11 +312,11 @@ local Realistic_FuelMod = menu.add_feature("Realistic FuelMod", "toggle", 0, fun
         system.wait(0)
     end
     if (not tog.on) then
-        --print("REMOVE LOOPS")
-        menu.delete_thread(fuelMod_threads["loop_thread"])
-        menu.delete_thread(fuelMod_threads["refuel_thread"])
-        menu.delete_thread(fuelMod_threads["hud_thread"])
+        fuelMod_threads["loop_thread"] = nil
+        fuelMod_threads["refuel_thread"] = nil
+        fuelMod_threads["hud_thread"] = nil
     end
+    return HANDLER_CONTINUE
 end)
 
 local MainID = menu.add_feature("Realistic FuelMod settings", "parent").id
@@ -439,6 +434,11 @@ end defineSettingsValues()
 --    usedVehicles[currentVehicle()] = current.TankSize
 --end)
 
+local function isNil(var)
+    if var == nil then return "false"
+    else return "true" end
+end
+
 menu.create_thread(function()
     system.yield(10)
 	Realistic_FuelMod.on = true
@@ -447,7 +447,3 @@ menu.create_thread(function()
 end, nil)
 
 REALISTIC_FUELMOD_LOADED = true
-
---local function GetNearestPump()
-----get_entity_coords()
---end
