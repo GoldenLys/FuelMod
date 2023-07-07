@@ -1,57 +1,59 @@
-if REALISTIC_FUELMOD_LOADED then
-	ui.notify_above_map("Realistic FuelMod is already loaded", "Realistic FuelMod", 6)
-	return
+if not menu.is_trusted_mode_enabled(1 << 2) then     -- Trusted natives mode check
+    menu.notify("Turn on trusted natives to use Realistic FuelMod")
+    menu.exit()
 end
 
-require("fuelMod\\LuaUI")
+require("fuelMod\\utils")
 require("fuelMod\\stations")
 
-local SCRIPT = {
+FUELMOD = {
     NAME = "Realistic FuelMod",
-    VERSION = "3.1"
+    VERSION = "3.5.4",
+    SETTINGS = false,
+    parent = {},
+    feature = {},
+    SESSION_ACTIVE = false
 }
 
-local fuelMod_threads = {
+
+fuelMod_threads = {
     "hud_thread",
     "loop_thread",
+    "disable_vehicle_thread",
     "refuel_thread",
-    "manualrefuel_thread"
+    "manualrefuel_thread",
+    "manualrefuel_hud_thread",
+    "status_thread"
 }
 
-local usedVehicles = {}
-local PATHS = {}
+usedVehicles = {}
+PATHS = {}
 PATHS.root = utils.get_appdata_path("PopstarDevs", "2Take1Menu")
 PATHS.fuelMod = PATHS.root .. "\\scripts\\fuelMod"
-PATHS.LogFile = PATHS.root .. "\\Realistic FuelMod.log"
-local fuelSettings = {
-    displayMode = 1,
+PATHS.Settings = PATHS.fuelMod .. "\\config.cfg"
+PATHS.LogFile = PATHS.fuelMod .. "\\Realistic FuelMod.log"
+fuelSettings = {
+    originalDisplayMode = false,
     posX = -0.67,
     posY = -0.915,
     scale = 0.15,
     textscale = 0.3,
     textposX = 0.165,
     textposY = 0.97,
-    stationsRange = 5.0,
-    baseFuelLevel = 30,
+    stationsRange = 3.5,
     refuel = 1,
     manualRefuel = 0.5,
-    consumptionRate = 1.0
+    consumptionRate = 1.0,
+    refuellingRepairs = true,
+    useJerryCanFuel = false,
+    manualRefuelConsumption = 1.0
 }
 
-local current = {
+current = {
+    status = false,
     FuelLevel = 30,
     TankSize = 100,
     latestHash = nil
-}
-
-local PumpModels = {
-	[-2007231801] = true,
-	[1339433404] = true,
-	[1694452750] = true,
-	[1933174915] = true,
-	[-462817101] = true,
-	[-469694731] = true,
-	[-164877493] = true
 }
 
 local FuelUsage = {
@@ -92,14 +94,32 @@ fuelConsumption[18] = {0.90, 70} -- Emergency
 fuelConsumption[19] = {1.25, 150} -- Military
 fuelConsumption[20] = {7.00, 350} -- Commercial
 fuelConsumption[21] = {0.00, 0} -- Trains
-fuelConsumption[22] = {6.00, 115} -- Open Wheel
-fuelConsumption.electrics = {1.15, 100} -- Electric
+fuelConsumption[22] = {3.00, 115} -- Open Wheel
+fuelConsumption.electrics = {1.05, 100} -- Electric
+
+spritelist = {
+    electric = {
+        red = "\\scripts\\fuelMod\\sprites\\electric_red.dds",
+        orange = "\\scripts\\fuelMod\\sprites\\electric_orange.dds",
+        green = "\\scripts\\fuelMod\\sprites\\electric_green.dds",
+    },
+    fuel = {
+        red = "\\scripts\\fuelMod\\sprites\\fuel_red.dds",
+        orange = "\\scripts\\fuelMod\\sprites\\fuel_orange.dds",
+        green = "\\scripts\\fuelMod\\sprites\\fuel_green.dds",
+    }
+}
+fuelSprite = {
+    electric = {},
+    fuel = {}
+}
 
 local basePrint = print
-local function print(...)
+function print(...)
 	local success, result = pcall(function(...)
 		local currTime = os.date("*t")
 		local file = io.open(PATHS.LogFile, "a")
+        if not utils.file_exists(PATHS.LogFile) then file:write("") end
 		
 		local args = {...}
 		for i=1,#args do
@@ -114,19 +134,18 @@ local function print(...)
 	end
 end
 
-local function notify(msg, title, seconds, color)
-    --title = title or SCRIPT.NAME
-    menu.notify(msg, title, seconds, color)
-    print(msg)
-end
-
-local function Round(num, dp)
+function Round(num, dp)
     local mult = 10^(dp or 0)
     return math.floor(num * mult + 0.5)/mult
 end
 
-local function currentVehicle()
+function currentVehicle()
     return ped.get_vehicle_ped_is_using(player.get_player_ped(player.player_id()))
+end
+
+function isInSupportVehicle()
+    if vehicle.get_vehicle_class(currentVehicle()) ~= 13 and vehicle.get_vehicle_class(currentVehicle()) ~= 14 and vehicle.get_vehicle_class(currentVehicle()) ~= 15 and vehicle.get_vehicle_class(currentVehicle()) ~= 16 and vehicle.get_vehicle_class(currentVehicle()) ~= 21 then return true
+    else return false end
 end
 
 local function IsDriving()
@@ -140,26 +159,9 @@ local function IsDriving()
 	return false
 end
 
-local function isEmpty(search)
-    return search == nil or search == ''
-end
-
-local function Get_Distance_Between_Coords(first, second)
-    local x = second.x - first.x
-    local y = second.y - first.y
-    local z = second.z - first.z
-    return math.sqrt(x * x + y * y + z * z)
-end
-
-local function GetDistanceBetweenCoords(pos1, pos2)
-    distance = pos1:magnitude(pos2)
-    notify(distance, nil, nil, LuaUI.RGBAToInt(245, 128, 0, 255))
-    return distance
-end
-
 local function IS_ELECTRIC()
     local EV = false
-    local evList = {"VOLTIC2", "VOLTIC", "CYCLONE2", "CYCLONE", "TEZERACT", "IWAGEN", "NEON", "RAIDEN", "AIRTUG", "CADDY3", "CADDY2", "CADDY", "IMORGON", "KHAMEL", "DILETTANTE", "SURGE", "OMNISEGT"}
+    local evList = {"VOLTIC2", "VOLTIC", "CYCLONE2", "CYCLONE", "TEZERACT", "IWAGEN", "NEON", "RAIDEN", "AIRTUG", "CADDY3", "CADDY2", "CADDY", "IMORGON", "KHAMEL", "DILETTANTE", "SURGE", "OMNISEGT", "VIRTUE", "POWERSURGE"}
 
     for k,v in pairs(evList) do
         if vehicle.get_vehicle_model_label(currentVehicle()) == v then EV = true end
@@ -167,18 +169,32 @@ local function IS_ELECTRIC()
     return EV
 end
 
+local function GetBaseFuelLevel()
+    local r=math.floor(math.random() * (12 - 1)) + 1
+    if r > 10 then 
+        return math.floor(math.random() * (100 - 75)) + 75
+    elseif r > 7 then
+        return math.floor(math.random() * (75 - 50)) + 50
+    else
+        return math.floor(math.random() * (50 - 30)) + 30
+    end
+end
+
 local function UPDATE_VEHICLE_DB()
     if isEmpty(usedVehicles[currentVehicle()]) then
-        usedVehicles[currentVehicle()] = fuelSettings.baseFuelLevel / 100 * fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][2]
-        current.FuelLevel = fuelSettings.baseFuelLevel / 100 * fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][2]
+        local baseFuel = GetBaseFuelLevel()
+        usedVehicles[currentVehicle()] = baseFuel / 100 * fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][2]
+        current.FuelLevel = baseFuel / 100 * fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][2]
     else current.FuelLevel = usedVehicles[currentVehicle()] end
 end
 
 local function fuelLevelDecreaseLevel()
         if (current.FuelLevel > 0 and entity.get_entity_speed(currentVehicle()) > 4) then
-            if IS_ELECTRIC() then current.FuelLevel = usedVehicles[currentVehicle()] - FuelUsage[Round(vehicle.get_vehicle_rpm(currentVehicle()), 1)] * (fuelConsumption.electrics[1]) * fuelSettings.consumptionRate
+            if IS_ELECTRIC() then current.FuelLevel = usedVehicles[currentVehicle()] - (FuelUsage[Round(vehicle.get_vehicle_rpm(currentVehicle()), 1)] * (fuelConsumption.electrics[1]) * fuelSettings.consumptionRate) / 10
+                --menu.notify("Battery level decreased by " .. (FuelUsage[Round(vehicle.get_vehicle_rpm(currentVehicle()), 1)] * (fuelConsumption.electrics[1]) * fuelSettings.consumptionRate) / 10)
                 current.TankSize = fuelConsumption.electrics[2]
             else
+                --menu.notify("Fuel level decreased by " .. (FuelUsage[Round(vehicle.get_vehicle_rpm(currentVehicle()), 1)] * (fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][1]) * fuelSettings.consumptionRate) / 15)
                 current.FuelLevel = usedVehicles[currentVehicle()] - (FuelUsage[Round(vehicle.get_vehicle_rpm(currentVehicle()), 1)] * (fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][1]) * fuelSettings.consumptionRate) / 15
                 current.TankSize = fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][2]
             end
@@ -188,12 +204,12 @@ local function fuelLevelDecreaseLevel()
     end
 end
 
-local function CAN_REFUEL_CHECK()
-    local isNearAnyStation = false
-    for name,coords in pairs(stationsList) do
-        if Get_Distance_Between_Coords(player.get_player_coords(player.player_id()), coords) <= fuelSettings.stationsRange then isNearAnyStation = true end
+function CAN_REFUEL_CHECK()
+    nearPump = nearestPump(player.get_player_coords(player.player_id()))
+    if nearPump ~= nil and nearPump ~= -1 then
+        if Get_Distance_Between_Coords(player.get_player_coords(player.player_id()), nearPump) <= fuelSettings.stationsRange then return true
+        else return false end
     end
-    return isNearAnyStation
 end
 
 local function fuelLevelIncreaseLevel()
@@ -202,15 +218,21 @@ local function fuelLevelIncreaseLevel()
             current.FuelLevel = usedVehicles[currentVehicle()] + fuelSettings.refuel
             usedVehicles[currentVehicle()] = current.FuelLevel
         end
-        if (current.FuelLevel > current.TankSize) then current.FuelLevel = current.TankSize end
+        if (current.FuelLevel > current.TankSize) then 
+            current.FuelLevel = current.TankSize
+            if fuelSettings.refuellingRepairs then
+                vehicle.set_vehicle_fixed(currentVehicle())
+			    vehicle.set_vehicle_engine_health(currentVehicle(), 1000)
+            end
+        end
     end
 end
 
 local function drawFuelBar()
-    if fuelSettings.displayMode == 1 then
+    if not fuelSettings.originalDisplayMode then
         local posX = fuelSettings.posX
         local posY = fuelSettings.posY
-        local fuelCol = LuaUI.RGBAToInt(255, 255, 255, 255)
+        local fuelCol = RGBAToInt(255, 255, 255, 255)
         local fuelPos = v2(posX, posY)
 
         local fuelColor = "orange"
@@ -218,79 +240,127 @@ local function drawFuelBar()
         elseif current.FuelLevel * 100 / current.TankSize >= 75 then fuelColor = "green" end
 
         local FuelPercentage = Round(current.FuelLevel * 100 / current.TankSize, 0)
-        LuaUI.drawText(math.floor(FuelPercentage) .. "%", fuelSettings.textposX, fuelSettings.textposY, 0, fuelSettings.textscale, Colour[fuelColor].r, Colour[fuelColor].g, Colour[fuelColor].b, true, false)
+        if FuelPercentage > 100 then FuelPercentage = 100 end
+        drawText(math.floor(FuelPercentage) .. "%", fuelSettings.textposX, fuelSettings.textposY, 0, fuelSettings.textscale, Colour[fuelColor].r, Colour[fuelColor].g, Colour[fuelColor].b, true, false)
         local fuelType = "fuel"
         if IS_ELECTRIC() then fuelType = "electric" end
-        local fuelSprite = "\\" .. fuelType .. "_" .. fuelColor .. ".dds"
-        local fuelSpriteLocation = PATHS.root .. "\\scripts\\fuelMod\\sprites" .. fuelSprite
-        fuelSpriteId = scriptdraw.register_sprite(fuelSpriteLocation)
-        scriptdraw.draw_sprite(fuelSpriteId, fuelPos, fuelSettings.scale, 0, fuelCol)
+        local sprite = fuelSprite[fuelType][fuelColor]
+        scriptdraw.draw_sprite(sprite, fuelPos, fuelSettings.scale, 0, fuelCol)
     else
         local fuelType = "Fuel"
         if IS_ELECTRIC() then fuelType = "Battery" end
         if current.FuelLevel * 100 / current.TankSize <= 15 then
-            LuaUI.drawText(string.format("Low " .. fuelType .. ": %i/%i", Round(current.FuelLevel, 0), current.TankSize), 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
-            LuaUI.drawRect(0.5, 0.99, (current.FuelLevel * 100 / current.TankSize) / 400, 0.015, Colour.red)
+            drawText(string.format("Low " .. fuelType .. ": %i/%i", Round(current.FuelLevel, 0), current.TankSize), 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
+            drawRect(0.5, 0.99, (current.FuelLevel * 100 / current.TankSize) / 400, 0.015, Colour.red)
         elseif current.FuelLevel * 100 / current.TankSize >= 75 then
-            LuaUI.drawText(string.format(fuelType .. ": %i/%i", Round(current.FuelLevel, 0), current.TankSize), 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
-            LuaUI.drawRect(0.5, 0.99, (current.FuelLevel * 100 / current.TankSize) / 400, 0.015, Colour.green)
+            drawText(string.format(fuelType .. ": %i/%i", Round(current.FuelLevel, 0), current.TankSize), 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
+            drawRect(0.5, 0.99, (current.FuelLevel * 100 / current.TankSize) / 400, 0.015, Colour.green)
         else
-            LuaUI.drawRect(0.5, 0.99, (current.FuelLevel * 100 / current.TankSize) / 400, 0.015, Colour.orange)
-            LuaUI.drawText(string.format(fuelType .. ": %i/%i", Round(current.FuelLevel, 0), current.TankSize), 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
+            drawRect(0.5, 0.99, (current.FuelLevel * 100 / current.TankSize) / 400, 0.015, Colour.orange)
+            drawText(string.format(fuelType .. ": %i/%i", Round(current.FuelLevel, 0), current.TankSize), 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
         end
     end
 end
 
+local function CanRefuelManually()
+    if usedVehicles[current.latestHash] < current.TankSize and ped.get_current_ped_weapon(player.get_player_ped(player.player_id())) == 883325847 and
+    Get_Distance_Between_Coords(player.get_player_coords(player.player_id()), player.get_player_coords(player.player_id())) <= 1 then
+        return true else return false end
+end
+
 local function MANUAL_REFUELLING()
     if (IsDriving() == false) then
-        if usedVehicles[current.latestHash] < current.TankSize and ped.get_current_ped_weapon(player.get_player_ped(player.player_id())) == 883325847 and
-            Get_Distance_Between_Coords(player.get_player_coords(player.player_id()), player.get_player_coords(player.player_id())) <= 1 then
-            usedVehicles[current.latestHash] = usedVehicles[current.latestHash] + fuelSettings.manualRefuel
-            if (usedVehicles[current.latestHash] > current.TankSize) then usedVehicles[current.latestHash] = current.TankSize end
+        if (CanRefuelManually() == true) then
+            local ammo = native.call(0x015A522136D7F951, player.player_ped(), 883325847):__tointeger()
+            if fuelSettings.useJerryCanFuel and ammo > 0 then 
+                weapon.set_ped_ammo(player.player_ped(), 883325847, ammo - (10 * fuelSettings.manualRefuelConsumption)) 
+                usedVehicles[current.latestHash] = usedVehicles[current.latestHash] + fuelSettings.manualRefuel
+                if (usedVehicles[current.latestHash] > current.TankSize) then usedVehicles[current.latestHash] = current.TankSize end
+            elseif not fuelSettings.useJerryCanFuel then
+                usedVehicles[current.latestHash] = usedVehicles[current.latestHash] + fuelSettings.manualRefuel
+                if (usedVehicles[current.latestHash] > current.TankSize) then usedVehicles[current.latestHash] = current.TankSize end
+            end
+
             local fuel_level = Round(usedVehicles[current.latestHash] * 100 / current.TankSize, 0)
             if fuelMod_threads["manualrefuel_thread"] == nil then
                 fuelMod_threads["manualrefuel_thread"] = menu.create_thread(function()
-                    while Realistic_FuelMod.on do
-                        LuaUI.drawText("Vehicle refuelled at ".. fuel_level .."%", 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
-                        system.yield(1500)
+                    while current.status == true do
+                        MANUAL_REFUELLING()
+                        system.yield(500)
+                        menu.delete_thread(fuelMod_threads["manualrefuel_hud_thread"])
+                        fuelMod_threads["manualrefuel_hud_thread"] = nil
+                    end
+                end, nil)
+            end
+            if fuelMod_threads["manualrefuel_hud_thread"] == nil then
+                fuelMod_threads["manualrefuel_hud_thread"] = menu.create_thread(function()
+                    while current.status == true do
+                        drawText("Vehicle refuelled at ".. fuel_level .."%", 0.5, 0.96, 0, 0.3, Colour.white.r, Colour.white.g, Colour.white.b, true, false)
+                        system.yield(0)
                     end
                 end, nil)
             end
         else
-            fuelMod_threads["manualrefuel_thread"] = nil
+            if fuelMod_threads["manualrefuel_thread"] ~= nil then 
+                menu.delete_thread(fuelMod_threads["manualrefuel_thread"])
+                fuelMod_threads["manualrefuel_thread"] = nil 
+            end
+            if fuelMod_threads["manualrefuel_hud_thread"] ~= nil then 
+                menu.delete_thread(fuelMod_threads["manualrefuel_hud_thread"])
+                fuelMod_threads["manualrefuel_hud_thread"] = nil
+            end
         end
     end
 end
 
 local function fuelMod()
-    if (IsDriving() == true) then
+    if (IsDriving() and isInSupportVehicle()) then
         if IS_ELECTRIC() then current.TankSize = fuelConsumption.electrics[2]
         else current.TankSize = fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][2] end
         UPDATE_VEHICLE_DB()
         fuelLevelDecreaseLevel()
-        if current.FuelLevel == 0 then vehicle.set_vehicle_engine_on(currentVehicle(), false, true, true) end
         current.latestHash = currentVehicle()
     end
 end
 
-local Realistic_FuelMod = menu.add_feature("Realistic FuelMod", "toggle", 0, function(tog)
-    if (tog.on) then
+FUELMOD.parent['MAIN'] = menu.add_feature("#FF007FF5#Realistic FuelMod v" .. FUELMOD.VERSION, "parent", 0).id
+
+FUELMOD.feature['REALISTIC FUELMOD'] = menu.add_feature("Realistic FuelMod", "toggle", FUELMOD.parent['MAIN'], function(f)
+    if (f.on) then
+        current.status = true
         if fuelMod_threads["loop_thread"] == nil then
             fuelMod_threads["loop_thread"] = menu.create_thread(function()
-                while tog.on do
+                while f.on do
                     fuelMod()
                     system.yield(1500)
                 end
             end, nil)
         end
+        if fuelMod_threads["disable_vehicle_thread"] == nil then
+            fuelMod_threads["disable_vehicle_thread"] = menu.create_thread(function()
+                while f.on do
+                    if IsDriving() and isInSupportVehicle() and current.FuelLevel <= 0 then vehicle.set_vehicle_engine_on(currentVehicle(), false, true, true) end
+                    system.yield(0)
+                end
+            end, nil)
+        end
         if fuelMod_threads["refuel_thread"] == nil then
             fuelMod_threads["refuel_thread"] = menu.create_thread(function()
-                while tog.on do
-                    if (IsDriving() == true) then
+                while f.on do
+                    if IsDriving() and isInSupportVehicle() then
                         UPDATE_VEHICLE_DB()
                         fuelLevelIncreaseLevel()
                     else
-                        if not isEmpty(current.latestHash) then MANUAL_REFUELLING() end
+                        if not isEmpty(current.latestHash) then MANUAL_REFUELLING() else 
+                            if fuelMod_threads["manualrefuel_thread"] ~= nil then 
+                                menu.delete_thread(fuelMod_threads["manualrefuel_thread"])
+                                fuelMod_threads["manualrefuel_thread"] = nil 
+                            end
+                            if fuelMod_threads["manualrefuel_hud_thread"] ~= nil then 
+                                menu.delete_thread(fuelMod_threads["manualrefuel_hud_thread"])
+                                fuelMod_threads["manualrefuel_hud_thread"] = nil
+                            end
+                        end
                     end
                     system.yield(250)
                 end
@@ -298,12 +368,10 @@ local Realistic_FuelMod = menu.add_feature("Realistic FuelMod", "toggle", 0, fun
         end
         if fuelMod_threads["hud_thread"] == nil then
             fuelMod_threads["hud_thread"] = menu.create_thread(function()
-                while tog.on do
-                    if (IsDriving() == true) then
-                        if fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][1] > 0 then
-                            drawFuelBar()
-                            drawFuelMarkers()
-                        end
+                while f.on do
+                    if IsDriving() and isInSupportVehicle() and fuelConsumption[vehicle.get_vehicle_class(currentVehicle())][1] > 0 then
+                        drawFuelBar()
+                        --drawFuelMarkers()
                     end
                     system.yield(0)
                 end
@@ -311,139 +379,152 @@ local Realistic_FuelMod = menu.add_feature("Realistic FuelMod", "toggle", 0, fun
         end
         system.wait(0)
     end
-    if (not tog.on) then
-        fuelMod_threads["loop_thread"] = nil
-        fuelMod_threads["refuel_thread"] = nil
-        fuelMod_threads["hud_thread"] = nil
+    if not f.on then
+        current.status = false
+        if fuelMod_threads["loop_thread"] ~= nil then 
+            menu.delete_thread(fuelMod_threads["loop_thread"])
+            fuelMod_threads["loop_thread"] = nil
+        end
+        if fuelMod_threads["disable_vehicle_thread"] ~= nil then 
+            menu.delete_thread(fuelMod_threads["disable_vehicle_thread"])
+            fuelMod_threads["disable_vehicle_thread"] = nil
+        end
+        if fuelMod_threads["refuel_thread"] ~= nil then 
+            menu.delete_thread( fuelMod_threads["refuel_thread"])
+            fuelMod_threads["refuel_thread"] = nil
+        end
+        if fuelMod_threads["hud_thread"] ~= nil then 
+            menu.delete_thread(fuelMod_threads["hud_thread"])
+            fuelMod_threads["hud_thread"] = nil
+        end
     end
     return HANDLER_CONTINUE
 end)
 
-local MainID = menu.add_feature("Realistic FuelMod settings", "parent").id
-local UISettingsID = menu.add_feature("UI settings", "parent", MainID).id
-local DebugID = menu.add_feature("debug", "parent", MainID).id
+FUELMOD.parent['SETTINGS'] = menu.add_feature("UI settings", "parent", FUELMOD.parent['MAIN']).id
 
 -- DISPLAY MODE
-local FuelModDisplay = menu.add_feature("Fuel gauge type", "action_value_str", UISettingsID, function(f)
-    fuelSettings.displayMode = f.value
-end):set_str_data({"Original (not editable)", "Modern"})
+FUELMOD.feature['ORIGINAL DISPLAY MODE'] = menu.add_feature("Original display mode", "toggle", FUELMOD.parent['SETTINGS'], function(f)
+    if f.on then fuelSettings.originalDisplayMode = true
+    else fuelSettings.originalDisplayMode = false end
+end)
+FUELMOD.feature['ORIGINAL DISPLAY MODE'].hint = "The design of the orginal display mode is not editable."
 
 -- UI POSITION
-local FuelModPosX = menu.add_feature("Position X", "autoaction_value_i", UISettingsID, function(f)
+FUELMOD.feature['ICON POS X'] = menu.add_feature("Position X", "autoaction_value_i", FUELMOD.parent['SETTINGS'], function(f)
     fuelSettings.posX = f.value / 1000
 end)
-FuelModPosX.min = -1000
-FuelModPosX.max = 1000
-FuelModPosX.mod = 5
+SetFeatureValues(FUELMOD.feature['ICON POS X'], -1000, 1000, 5)
 
-local FuelModPosY = menu.add_feature("Position Y", "autoaction_value_i", UISettingsID, function(f)
+FUELMOD.feature['ICON POS Y'] = menu.add_feature("Position Y", "autoaction_value_i", FUELMOD.parent['SETTINGS'], function(f)
     fuelSettings.posY = f.value / 1000
 end)
-FuelModPosY.min = -1000
-FuelModPosY.max = 1000
-FuelModPosY.mod = 5
+SetFeatureValues(FUELMOD.feature['ICON POS Y'], -1000, 1000, 5)
 
 -- UI SCALE
-local FuelModScale = menu.add_feature("Scale", "autoaction_slider", UISettingsID, function(f)
+FUELMOD.feature['ICON SCALE'] = menu.add_feature("Icon scale", "autoaction_slider", FUELMOD.parent['SETTINGS'], function(f)
     fuelSettings.scale = Round(f.value, 2)
 end)
-FuelModScale.min = 0
-FuelModScale.max = 2
-FuelModScale.mod = 0.05
+SetFeatureValues(FUELMOD.feature['ICON SCALE'], 0, 2, 0.05)
 
 -- TEXT POSITION
-local FuelModTextPosX = menu.add_feature("Text position X", "autoaction_value_i", UISettingsID, function(f)
+FUELMOD.feature['TEXT POS X'] = menu.add_feature("Text position X", "autoaction_value_i", FUELMOD.parent['SETTINGS'], function(f)
     fuelSettings.textposX = f.value / 1000
 end)
-FuelModTextPosX.min = 0
-FuelModTextPosX.max = 1000
-FuelModTextPosX.mod = 5
+SetFeatureValues(FUELMOD.feature['TEXT POS X'], 0, 1000, 5)
 
-local FuelModTextPosY = menu.add_feature("Text position Y", "autoaction_value_i", UISettingsID, function(f)
+FUELMOD.feature['TEXT POS Y']  = menu.add_feature("Text position Y", "autoaction_value_i", FUELMOD.parent['SETTINGS'], function(f)
     fuelSettings.textposY = f.value / 1000
 end)
-FuelModTextPosY.min = 0
-FuelModTextPosY.max = 1000
-FuelModTextPosY.mod = 5
+SetFeatureValues(FUELMOD.feature['TEXT POS Y'] , 0, 1000, 5)
 
 -- TEXT SCALE
-local FuelModTextScale = menu.add_feature("Text scale", "autoaction_slider", UISettingsID, function(f)
+FUELMOD.feature['TEXT SCALE'] = menu.add_feature("Text scale", "autoaction_slider", FUELMOD.parent['SETTINGS'], function(f)
     fuelSettings.textscale = Round(f.value, 2)
 end)
-FuelModTextScale.min = 0
-FuelModTextScale.max = 2
-FuelModTextScale.mod = 0.05
+SetFeatureValues(FUELMOD.feature['TEXT SCALE'], 0, 2, 0.05)
 
 -- REFILL RANGE
-local RefillRange = menu.add_feature("Refill range in gas stations", "autoaction_slider", MainID, function(f)
+FUELMOD.feature['REFILL RANGE'] = menu.add_feature("Refill range in stations", "autoaction_slider", FUELMOD.parent['MAIN'], function(f)
     fuelSettings.stationsRange = Round(f.value, 2)
 end)
-RefillRange.min = 2.5
-RefillRange.max = 25
-RefillRange.mod = 0.5
+SetFeatureValues(FUELMOD.feature['REFILL RANGE'], 2.5, 10, 0.5)
 
 -- REFUEL POWER
-local Refuel = menu.add_feature("Refuelling power", "autoaction_value_f", MainID, function(f)
+FUELMOD.feature['REFUEL POWER'] = menu.add_feature("Refuelling power", "autoaction_value_f", FUELMOD.parent['MAIN'], function(f)
     fuelSettings.refuel = Round(f.value, 2)
 end)
-Refuel.min = 0.05
-Refuel.max = 2.5
-Refuel.mod = 0.05
+SetFeatureValues(FUELMOD.feature['REFUEL POWER'], 0.05, 2.50, 0.05)
 
 -- MANUAL REFUEL POWER
-local ManualRefuel = menu.add_feature("Manual Refuelling power", "autoaction_value_f", MainID, function(f)
+FUELMOD.feature['MANUAL REFUEL POWER'] = menu.add_feature("Manual refuelling power", "autoaction_value_f", FUELMOD.parent['MAIN'], function(f)
     fuelSettings.manualRefuel = Round(f.value, 2)
 end)
-ManualRefuel.min = 0.05
-ManualRefuel.max = 2.50
-ManualRefuel.mod = 0.05
+SetFeatureValues(FUELMOD.feature['MANUAL REFUEL POWER'], 0.05, 2.50, 0.05)
 
--- BASE FUEL LEVEL
-local BaseFuel = menu.add_feature("Base fuel percentage", "autoaction_value_i", MainID, function(f)
-    fuelSettings.baseFuelLevel = f.value
+-- MANUAL REFUEL FUEL CONSUMPTION
+FUELMOD.feature['MANUAL REFUEL FUEL CONSUMPTION'] = menu.add_feature("Manual refuel fuel consumption", "autoaction_value_f", FUELMOD.parent['MAIN'], function(f)
+    fuelSettings.manualRefuelConsumption = Round(f.value, 2)
 end)
-BaseFuel.min = 0
-BaseFuel.max = 100
-BaseFuel.mod = 5
+SetFeatureValues(FUELMOD.feature['MANUAL REFUEL FUEL CONSUMPTION'], 0.05, 2.50, 0.05)
 
 -- CONSUMPTION RATE
-local ConsumptionRate = menu.add_feature("Fuel consumption rate", "autoaction_value_f", MainID, function(f)
+FUELMOD.feature['CONSUMPTION RATE'] = menu.add_feature("Fuel consumption rate", "autoaction_value_f", FUELMOD.parent['MAIN'], function(f)
     fuelSettings.consumptionRate = Round(f.value, 2)
 end)
-ConsumptionRate.min = 0.1
-ConsumptionRate.max = 2.5
-ConsumptionRate.mod = 0.1
+SetFeatureValues(FUELMOD.feature['CONSUMPTION RATE'], 0.1, 2.5, 0.1)
 
-local function defineSettingsValues()
-    local POS = {fuelSettings.posX * 1000, fuelSettings.posY * 1000}
-    FuelModPosX.value = POS[1]
-    FuelModPosY.value = POS[2]
-    FuelModScale.value = fuelSettings.scale
-    local TEXTPOS = {fuelSettings.textposX * 1000, fuelSettings.textposY * 1000}
-    FuelModTextPosX.value = TEXTPOS[1]
-    FuelModTextPosY.value = TEXTPOS[2]
-    FuelModTextScale.value = fuelSettings.textscale
-    RefillRange.value = fuelSettings.stationsRange
-    Refuel.value = fuelSettings.refuel
-    ManualRefuel.value = fuelSettings.manualRefuel
-    BaseFuel.value = fuelSettings.baseFuelLevel
-    ConsumptionRate.value = fuelSettings.consumptionRate
-end defineSettingsValues()
+FUELMOD.feature['SHOW BLIPS'] = menu.add_feature("Show Blips", "toggle", FUELMOD.parent['MAIN'], function(f)
+    if f.on then 
+        if fuelMod_threads["status_thread"] == nil then
+            fuelMod_threads["status_thread"] = menu.create_thread(function()
+                while f.on do
+                    if IsFullyTransitionedIntoSession() and not FUELMOD.SESSION_ACTIVE then FUELMOD.SESSION_ACTIVE = true
+                    elseif not IsFullyTransitionedIntoSession() and FUELMOD.SESSION_ACTIVE then
+                        FUELMOD.SESSION_ACTIVE = false
+                        print("Detected session switch, disabling blips")
+                    else FUELMOD.SESSION_ACTIVE = false end
 
---menu.add_feature("Force refuel", "action", DebugID, function() 
---    usedVehicles[currentVehicle()] = current.TankSize
---end)
+                    if FUELMOD.SESSION_ACTIVE then
+                        clearBlips() 
+                        drawFuelBlips()
+                    end
+                    system.yield(5000)
+                end
+            end, nil)
+        end
 
-local function isNil(var)
-    if var == nil then return "false"
-    else return "true" end
-end
+    else
+        if fuelMod_Blips ~= nil then clearBlips() end
+        if fuelMod_threads["status_thread"] ~= nil then 
+            menu.delete_thread(fuelMod_threads["status_thread"])
+            fuelMod_threads["status_thread"] = nil
+        end
+    end
+end)
 
+FUELMOD.feature['REFUELLING REPAIRS'] = menu.add_feature("Repairs in stations", "toggle", FUELMOD.parent['MAIN'], function(f)
+    if f.on then fuelSettings.refuellingRepairs = true
+    else fuelSettings.refuellingRepairs = false end
+end)
+
+FUELMOD.feature['JERRY CAN FUEL'] = menu.add_feature("Use jerry can fuel", "toggle", FUELMOD.parent['MAIN'], function(f)
+    if f.on then fuelSettings.useJerryCanFuel = true
+    else fuelSettings.useJerryCanFuel = false end
+end)
+
+FUELMOD.feature['SAVE SETTINGS'] = menu.add_feature("Save settings", "action", FUELMOD.parent['MAIN'], SaveSettings)
+
+require("fuelMod\\debug")
 menu.create_thread(function()
     system.yield(10)
-	Realistic_FuelMod.on = true
-    notify(SCRIPT.NAME .. " v" .. SCRIPT.VERSION .. " successfully loaded.", nil, nil, LuaUI.RGBAToInt(245, 128, 0, 255))
-    defineSettingsValues()
+    FUELMOD.feature['SHOW BLIPS'].on = true
+    FUELMOD.feature['REFUELLING REPAIRS'].on = true
+	FUELMOD.feature['REALISTIC FUELMOD'].on = true
+    local LOADED_SETTINGS = ""
+    LoadSprites()
+    LoadSettingsFromFile()
+    UpdateMenuSettings()
+    if FUELMOD.SETTINGS then LOADED_SETTINGS = " with saved settings" end
+    notify(" Successfully loaded" ..  LOADED_SETTINGS .. ".", "#FF007FF5#" .. FUELMOD.NAME .. "#FFFFFFFF# v" .. FUELMOD.VERSION, nil, RGBAToInt(245, 128, 0, 255))
 end, nil)
-
-REALISTIC_FUELMOD_LOADED = true
